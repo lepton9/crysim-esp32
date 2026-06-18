@@ -1,0 +1,3 @@
+config LILYGO_T_DISPLAY_S3
+    bool
+    default y

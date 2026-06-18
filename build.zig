@@ -28,6 +28,12 @@ pub fn build(b: *std.Build) void {
     b.step("menuconfig", "Configure project (idf.py menuconfig)")
         .dependOn(&idf(b, idf_env, project_dir, &.{"menuconfig"}).step);
 
+    b.step("reconfigure", "Re-run CMake/Kconfig configuration (idf.py reconfigure)")
+        .dependOn(&idf(b, idf_env, project_dir, &.{"reconfigure"}).step);
+
+    b.step("add-depencency", "Add a dependency")
+        .dependOn(&idf(b, idf_env, project_dir, &.{"add-dependency"}).step);
+
     b.step("clean", "Full clean (idf.py fullclean)")
         .dependOn(&idf(b, idf_env, project_dir, &.{"fullclean"}).step);
 

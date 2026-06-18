@@ -2,4 +2,9 @@
 zig-out/
 
 build/
-.cache
+.cache/
+
+sdkconfig
+sdkconfig.old
+
+managed_components/
