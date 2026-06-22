@@ -45,6 +45,9 @@ pub fn build(b: *std.Build) void {
 
     b.step("flash-monitor", "Flash then monitor")
         .dependOn(&idfPort(b, idf_env, project_dir, port, &.{ "flash", "monitor", "-b", baud }).step);
+
+    const formatc = b.step("formatc", "Run uncrustify on C source");
+    setupUncrustify(b, formatc, project_dir) catch {};
 }
 
 fn resolveIdfPy(b: *std.Build, idf_env: *const std.process.Environ.Map) []const u8 {
@@ -168,4 +171,59 @@ fn parseEnvToMap(b: *std.Build, env0: []const u8) !*std.process.Environ.Map {
     }
 
     return env_ptr;
+}
+
+/// Setup the uncrustify step to format C files.
+fn setupUncrustify(b: *std.Build, step: *std.Build.Step, project_dir: []const u8) !void {
+    const sources = try collectUncrustifySources(b, project_dir);
+    if (sources.len == 0) return;
+
+    const uncrustify = b.dependency("uncrustify", .{
+        .optimize = .ReleaseFast,
+    });
+    const uncrustify_exe = uncrustify.artifact("uncrustify");
+    const update = b.addUpdateSourceFiles();
+    for (sources) |file| {
+        const run = b.addRunArtifact(uncrustify_exe);
+        run.addArgs(&.{ "-c", "uncrustify.cfg", "-f" });
+        run.addFileArg(b.path(file));
+        run.addArg("-o");
+        const output_name = try std.mem.replaceOwned(u8, b.allocator, file, "/", "-");
+        const output = run.addOutputFileArg(output_name);
+        update.addCopyFileToSource(output, file);
+    }
+    step.dependOn(&update.step);
+}
+
+/// Collect all the files to format.
+fn collectUncrustifySources(b: *std.Build, project_dir: []const u8) ![]const []const u8 {
+    const roots = &[_][]const u8{"main"};
+    const io = b.graph.io;
+    const cwd = std.Io.Dir.cwd();
+    const gpa = b.allocator;
+
+    var files: std.ArrayList([]const u8) = .empty;
+
+    for (roots) |root| {
+        const root_path = try std.Io.Dir.path.join(gpa, &.{ project_dir, root });
+        const dir = cwd.openDir(io, root_path, .{ .iterate = true }) catch continue;
+        defer dir.close(io);
+
+        var walker = try dir.walk(gpa);
+        defer walker.deinit();
+
+        while (try walker.next(io)) |entry| {
+            if (entry.kind != .file) continue;
+            if (!std.mem.endsWith(u8, entry.path, ".c") and
+                !std.mem.endsWith(u8, entry.path, ".h"))
+                continue;
+
+            try files.append(gpa, try std.Io.Dir.path.join(gpa, &.{
+                root_path,
+                entry.path,
+            }));
+        }
+    }
+
+    return files.items;
 }

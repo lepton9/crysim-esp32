@@ -1,6 +1,12 @@
 .{
     .name = .crysim_esp32,
     .version = "0.0.1",
+    .dependencies = .{
+        .uncrustify = .{
+            .url = "git+https://codeberg.org/allyourcodebase/uncrustify.git#334f306f25d08bf16ce7e4ba61009e36f470d3f1",
+            .hash = "uncrustify-0.83.0-qkVd7bpCAADicPFhSHFK90-7aOvzjb29zUdexvTuBHVd",
+        },
+    },
     .minimum_zig_version = "0.16.0",
     .paths = .{""},
     .fingerprint = 0xd92d45df3c37e442,
