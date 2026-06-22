@@ -1,5 +1,6 @@
 #include "ui.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "esp_system.h"
@@ -81,7 +82,7 @@ esp_err_t ui_init(ui_t *ui) {
         RETURN_IF_ERR(esp_timer_start_periodic(s_lv_tick_timer, UI_LVGL_TICK_MS * 1000));
     }
 
-    // TODO: change ui
+    // Setup UI layout
     ui->ui_text_label = lv_label_create(lv_scr_act());;
     lv_label_set_text(ui->ui_text_label, "");
     lv_obj_align(ui->ui_text_label, LV_ALIGN_TOP_LEFT, 10, 10);
@@ -92,24 +93,23 @@ esp_err_t ui_init(ui_t *ui) {
 void render_ui(ui_t *ui) {
     if (!ui->ui_text_label) return;
 
-
     int free_heap_bytes = esp_get_free_heap_size();
 
-    lv_label_set_text_fmt((lv_obj_t *)ui->ui_text_label, "ticks=%lu\nb1=%d b2=%d\nfree=%d MB",
-                          (unsigned long)ui->ticks, ui->button1, ui->button2, free_heap_bytes / 1000000);
-}
+    char buffer[128];
+    buffer[0] = 0;
+    if (!ui->vtable.get_ui_text) return;
+    ui->vtable.get_ui_text(ui->ptr, buffer, sizeof(buffer));
 
-void ui_set_buttons(ui_t *ui, int b1_level, int b2_level) {
-    if (!ui) return;
-    ui->button1 = b1_level;
-    ui->button2 = b2_level;
+    lv_label_set_text_fmt((lv_obj_t *)ui->ui_text_label,
+                          "ticks=%d\nfree=%d MB\n%s",
+                          ui->ticks,
+                          free_heap_bytes / 1000000,
+                          buffer);
 }
 
 void ui_tick(ui_t *ui) {
     if (!ui) return;
     ui->ticks++;
-
     render_ui(ui);
-
     lv_timer_handler();
 }
