@@ -1,13 +1,28 @@
 #pragma once
 
-#include <stddef.h>
+#include <stdint.h>
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+
+// Commands sent from UI task to client task.
+typedef enum {
+    CMD_BUTTON1_PRESS = 0,
+    CMD_BUTTON2_PRESS = 1,
+} client_cmd_type_t;
 
 typedef struct {
-    int button1;
-    int button2;
-} client_t;
+    client_cmd_type_t type;
+} client_cmd_t;
 
-size_t get_ui_text(void *ptr, char *dst, size_t dst_size);
+// Status sent from client task to UI task.
+typedef struct {
+    uint32_t button1_presses;
+    uint32_t button2_presses;
+    uint32_t seq;
+} client_status_t;
 
-// Update inputs.
-void set_buttons(client_t *client, int b1_level, int b2_level);
+// Starts the client task.
+// cmd_q: UI -> client commands.
+// status_q: client -> UI status.
+void client_task_start(QueueHandle_t cmd_q, QueueHandle_t status_q);

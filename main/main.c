@@ -1,8 +1,5 @@
-#include <inttypes.h>
-
 #include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-
+#include "esp_log.h"
 #include "driver/gpio.h"
 
 #include "pin_config.h"
@@ -10,8 +7,10 @@
 #include "ui.h"
 #include "client.h"
 
+
 #define USB_LEFT false
-#define LOOP_FREQ_MS 10
+
+static const char *TAG = "main";
 
 static void configure_input(gpio_num_t pin, bool pullup) {
     const gpio_config_t cfg = {
@@ -25,28 +24,19 @@ static void configure_input(gpio_num_t pin, bool pullup) {
     ESP_ERROR_CHECK(gpio_config(&cfg));
 }
 
-
 void app_main(void) {
     ESP_ERROR_CHECK(display_init(USB_LEFT));
-
-
-    client_t client;
-    ui_t ui;
-
-    ESP_ERROR_CHECK(ui_init(&ui));
-
-    ui.ptr = &client;
-    ui.vtable.get_ui_text = &get_ui_text;
+    ESP_LOGI(TAG, "display init done");
 
     configure_input((gpio_num_t)PIN_BUTTON_1, true);
     configure_input((gpio_num_t)PIN_BUTTON_2, true);
 
-    while (true) {
-        const int b1 = gpio_get_level((gpio_num_t)PIN_BUTTON_1);
-        const int b2 = gpio_get_level((gpio_num_t)PIN_BUTTON_2);
-        set_buttons(&client, b1, b2);
-        ui_tick(&ui);
+    QueueHandle_t cmd_q = xQueueCreate(8, sizeof(client_cmd_t));
+    QueueHandle_t status_q = xQueueCreate(1, sizeof(client_status_t));
 
-        vTaskDelay(pdMS_TO_TICKS(LOOP_FREQ_MS));
-    }
+    client_task_start(cmd_q, status_q);
+    ESP_LOGI(TAG, "client task started");
+
+    ui_task_start(cmd_q, status_q);
+    ESP_LOGI(TAG, "ui task started");
 }
