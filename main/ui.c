@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -20,8 +21,8 @@ static const char *TAG = "ui";
 #define UI_LVGL_TICK_MS 5
 
 #define RETURN_IF_ERR(expr) do { \
-    esp_err_t __err = (expr); \
-    if (__err != ESP_OK) return __err; \
+            esp_err_t __err = (expr); \
+            if (__err != ESP_OK) return __err; \
 } while (0)
 
 static lv_disp_draw_buf_t s_draw_buf;
@@ -36,6 +37,7 @@ static void lv_tick_timer_cb(void *arg) {
 
 static void on_flush_done(void *ctx) {
     lv_disp_drv_t *drv = (lv_disp_drv_t *)ctx;
+
     lv_disp_flush_ready(drv);
 }
 
@@ -73,18 +75,28 @@ esp_err_t ui_init(ui_t *ui) {
     if (!s_lv_tick_timer) {
         const esp_timer_create_args_t targs = {
             .callback = &lv_tick_timer_cb,
-            .name = "lv_tick",
+            .name     = "lv_tick",
         };
         RETURN_IF_ERR(esp_timer_create(&targs, &s_lv_tick_timer));
         RETURN_IF_ERR(esp_timer_start_periodic(s_lv_tick_timer, UI_LVGL_TICK_MS * 1000));
     }
 
     // TODO: change ui
-    ui->label = lv_label_create(lv_scr_act());;
-    lv_label_set_text(ui->label, "Hello");
-    lv_obj_align(ui->label, LV_ALIGN_TOP_LEFT, 10, 10);
+    ui->ui_text_label = lv_label_create(lv_scr_act());;
+    lv_label_set_text(ui->ui_text_label, "");
+    lv_obj_align(ui->ui_text_label, LV_ALIGN_TOP_LEFT, 10, 10);
 
     return ESP_OK;
+}
+
+void render_ui(ui_t *ui) {
+    if (!ui->ui_text_label) return;
+
+
+    int free_heap_bytes = esp_get_free_heap_size();
+
+    lv_label_set_text_fmt((lv_obj_t *)ui->ui_text_label, "ticks=%lu\nb1=%d b2=%d\nfree=%d MB",
+                          (unsigned long)ui->ticks, ui->button1, ui->button2, free_heap_bytes / 1000000);
 }
 
 void ui_set_buttons(ui_t *ui, int b1_level, int b2_level) {
@@ -97,11 +109,7 @@ void ui_tick(ui_t *ui) {
     if (!ui) return;
     ui->ticks++;
 
-    // TODO: ui
-    if (ui->label) {
-        lv_label_set_text_fmt((lv_obj_t *)ui->label, "ticks=%lu\nb1=%d b2=%d",
-                              (unsigned long)ui->ticks, ui->button1, ui->button2);
-    }
+    render_ui(ui);
 
     lv_timer_handler();
 }

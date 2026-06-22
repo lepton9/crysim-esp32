@@ -5,13 +5,15 @@
 
 #include "esp_err.h"
 
+#include "lvgl.h"
+
 typedef struct ui {
-    int button1;
-    int button2;
+    int       button1;
+    int       button2;
 
     // Internal UI state
-    void *label; // lv_obj_t*
-    uint32_t ticks;
+    lv_obj_t *ui_text_label;
+    uint32_t  ticks;
 } ui_t;
 
 // Initialize LVGL, register the display driver.
