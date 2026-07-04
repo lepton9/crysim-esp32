@@ -104,7 +104,7 @@ esp_err_t display_init(bool usb_left) {
     const esp_lcd_panel_io_i80_config_t io_config = {
         .cs_gpio_num         = (gpio_num_t)BOARD_TFT_CS,
         .pclk_hz             = LCD_PIXEL_CLOCK_HZ,
-        .trans_queue_depth   = 10,
+        .trans_queue_depth   = 5,
         .on_color_trans_done = on_color_trans_done,
         .user_ctx            = &s_flush_hook,
         .lcd_cmd_bits        = 8,

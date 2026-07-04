@@ -60,7 +60,7 @@
 #define AMOLED_HEIGHT        (320)
 
 #define BOARD_HAS_TOUCH      0
-#define DISPLAY_BUFFER_SIZE  (AMOLED_WIDTH * 100)
+#define DISPLAY_BUFFER_SIZE  (AMOLED_WIDTH * 20)
 #define DISPLAY_FULLRESH     false
 
 #define DISPLAY_HOR_RES      (AMOLED_HEIGHT)
