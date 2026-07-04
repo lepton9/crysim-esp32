@@ -1,5 +1,6 @@
 #include "ui.h"
 
+#include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -11,6 +12,8 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 
+#include "freertos/task.h"
+
 #include "display_s3.h"
 #include "pin_config.h"
 #include "client.h"
@@ -18,6 +21,8 @@
 static const char *TAG = "ui";
 
 #define UI_LVGL_TICK_MS 5
+#define BUTTON_HOLD_MS 3000
+#define BUTTON_DEBOUNCE_MS 30
 
 #define RETURN_IF_ERR(expr) do { \
             esp_err_t __err = (expr); \
@@ -106,6 +111,73 @@ typedef struct {
     QueueHandle_t status_q;
 } ui_task_args_t;
 
+static inline void send_cmd(QueueHandle_t q, client_cmd_type_t type) {
+    if (!q) return;
+    const client_cmd_t cmd = { .type = type };
+    (void)xQueueSend(q, &cmd, 0);
+}
+
+typedef struct {
+    bool    stable;
+    bool    last_raw;
+    uint8_t same_count;
+} debounce_t;
+
+static bool debounce_update(debounce_t *d, bool raw_pressed) {
+    if (raw_pressed == d->last_raw) {
+        if (d->same_count < 255) d->same_count++;
+    } else {
+        d->last_raw = raw_pressed;
+        d->same_count = 0;
+    }
+
+    const uint8_t needed = (uint8_t)((BUTTON_DEBOUNCE_MS + LOOP_FREQ_MS - 1) / LOOP_FREQ_MS);
+    if (d->same_count >= needed)
+        d->stable = raw_pressed;
+
+    return d->stable;
+}
+
+typedef struct {
+    debounce_t db;
+    bool       prev_pressed;
+    bool       pressed;
+    TickType_t press_start;
+    bool       long_fired;
+} button_t;
+
+typedef struct {
+    bool       pressed;
+    bool       just_pressed;
+    bool       just_released;
+    TickType_t held_ticks;      // valid while pressed
+    TickType_t press_ticks;     // valid on just_released
+} button_sample_t;
+
+static button_sample_t button_update(button_t *b, bool raw_pressed, TickType_t now) {
+    button_sample_t s = { 0 };
+
+    b->pressed = debounce_update(&b->db, raw_pressed);
+
+    s.pressed = b->pressed;
+    s.just_pressed = b->pressed && !b->prev_pressed;
+    s.just_released = !b->pressed && b->prev_pressed;
+
+    if (s.just_pressed) {
+        b->press_start = now;
+        b->long_fired = false;
+    }
+    if (s.just_released) {
+        s.press_ticks = now - b->press_start;
+        b->long_fired = false;
+    }
+    if (b->pressed)
+        s.held_ticks = now - b->press_start;
+
+    b->prev_pressed = b->pressed;
+    return s;
+}
+
 static void ui_task(void *arg) {
     ui_task_args_t *a = (ui_task_args_t *)arg;
     QueueHandle_t cmd_q = a->cmd_q;
@@ -115,13 +187,18 @@ static void ui_task(void *arg) {
 
     ESP_ERROR_CHECK(ui_init(&ui));
 
-    bool prev_b1_pressed = false;
-    bool prev_b2_pressed = false;
+    button_t b1 = { 0 };
+    button_t b2 = { 0 };
+
+    bool prev_both_pressed = false;
+    TickType_t both_press_start = 0;
+    bool both_long_fired = false;
+    bool combo_active = false;
 
     bool have_status = false;
     client_status_t last_st = { 0 };
 
-    char buffer[128];
+    char buffer[192];
     buffer[0] = 0;
 
     while (true) {
@@ -131,27 +208,101 @@ static void ui_task(void *arg) {
             have_status = true;
         }
 
-        // Poll GPIO button presses
-        const bool b1_pressed = gpio_get_level((gpio_num_t)PIN_BUTTON_1) == 0;
-        const bool b2_pressed = gpio_get_level((gpio_num_t)PIN_BUTTON_2) == 0;
-        if (b1_pressed && !prev_b1_pressed) {
-            const client_cmd_t cmd = { .type = CMD_BUTTON1_PRESS };
-            xQueueSend(cmd_q, &cmd, 0);
+        const TickType_t now = xTaskGetTickCount();
+
+        // Poll GPIO buttons
+        const bool b1_raw = gpio_get_level((gpio_num_t)PIN_BUTTON_1) == 0;
+        const bool b2_raw = gpio_get_level((gpio_num_t)PIN_BUTTON_2) == 0;
+        const button_sample_t b1_s = button_update(&b1, b1_raw, now);
+        const button_sample_t b2_s = button_update(&b2, b2_raw, now);
+
+        const bool both_pressed = b1_s.pressed && b2_s.pressed;
+
+        // Track combo hold
+        if (both_pressed) combo_active = true;
+        if (!b1_s.pressed && !b2_s.pressed) combo_active = false;
+
+        if (both_pressed && !prev_both_pressed) {
+            both_press_start = now;
+            both_long_fired = false;
         }
-        if (b2_pressed && !prev_b2_pressed) {
-            const client_cmd_t cmd = { .type = CMD_BUTTON2_PRESS };
-            xQueueSend(cmd_q, &cmd, 0);
+        if (!both_pressed) both_long_fired = false;
+        prev_both_pressed = both_pressed;
+
+        // Hold both to reset + provision
+        if (both_pressed && !both_long_fired && (now - both_press_start) >= pdMS_TO_TICKS(BUTTON_HOLD_MS)) {
+            send_cmd(cmd_q, CMD_UI_RESET_AND_PROV);
+            both_long_fired = true;
         }
-        prev_b1_pressed = b1_pressed;
-        prev_b2_pressed = b2_pressed;
+
+        const client_ui_mode_t mode = have_status ? last_st.ui_mode : CLIENT_UI_NORMAL;
+        switch (mode) {
+        case CLIENT_UI_NORMAL:
+            // Hold B1 to enter provisioning prompt
+            if (!both_pressed && b1_s.pressed && !b1.long_fired && b1_s.held_ticks >= pdMS_TO_TICKS(BUTTON_HOLD_MS)) {
+                send_cmd(cmd_q, CMD_UI_ENTER_PROV_PROMPT);
+                b1.long_fired = true;
+            }
+
+            // Short press actions
+            if (!combo_active && !both_long_fired) {
+                if (b1_s.just_released) send_cmd(cmd_q, CMD_BUTTON1_PRESS);
+                if (b2_s.just_released) send_cmd(cmd_q, CMD_BUTTON2_PRESS);
+            }
+            break;
+
+        case CLIENT_UI_PROV_PROMPT:
+            // Hold B1 to cancel
+            if (!both_pressed && b1_s.pressed && !b1.long_fired && b1_s.held_ticks >= pdMS_TO_TICKS(BUTTON_HOLD_MS)) {
+                send_cmd(cmd_q, CMD_UI_CANCEL_PROV);
+                b1.long_fired = true;
+            }
+            // B2 short press to start provisioning
+            if (!combo_active && !both_long_fired && b2_s.just_released)
+                send_cmd(cmd_q, CMD_UI_START_PROV);
+            break;
+
+        case CLIENT_UI_PROVISIONING:
+            // Hold B1 to cancel
+            if (!both_pressed && b1_s.pressed && !b1.long_fired && b1_s.held_ticks >= pdMS_TO_TICKS(BUTTON_HOLD_MS)) {
+                send_cmd(cmd_q, CMD_UI_CANCEL_PROV);
+                b1.long_fired = true;
+            }
+            break;
+
+        default:
+            break;
+        }
 
         if (have_status) {
-            snprintf(buffer, sizeof(buffer),
-                     "ticks=%lu\nclient: b1=%lu" " b2=%lu" "\nseq=%lu",
-                     ui.ticks,
-                     last_st.button1_presses,
-                     last_st.button2_presses,
-                     last_st.seq);
+            switch (last_st.ui_mode) {
+            case CLIENT_UI_NORMAL:
+                const char *wifi_state = last_st.wifi_connected ? "connected" :
+                                         (last_st.wifi_ssid[0] ? "not connected" : "not provisioned");
+                const char *ssid = last_st.wifi_ssid[0] ? last_st.wifi_ssid : "(none)";
+                const char *ip = last_st.wifi_connected ? (last_st.wifi_ip[0] ? last_st.wifi_ip : "(none)") : "-";
+                snprintf(buffer, sizeof(buffer),
+                         "WiFi: %s\nSSID: %s\nIP: %s\nB1=%" PRIu32 " B2=%" PRIu32,
+                         wifi_state,
+                         ssid,
+                         ip,
+                         last_st.button1_presses,
+                         last_st.button2_presses);
+                break;
+            case CLIENT_UI_PROV_PROMPT:
+                snprintf(buffer, sizeof(buffer),
+                         "Provision WiFi?\nB2: start\nHold B1: cancel\nHold B1+B2: reset");
+                break;
+            case CLIENT_UI_PROVISIONING:
+                snprintf(buffer, sizeof(buffer),
+                         "BLE Provisioning\nName: %s\nWiFi: %s\nHold B1: stop",
+                         last_st.ble_name[0] ? last_st.ble_name : "(tbd)",
+                         last_st.wifi_connected ? "connected" : "connecting");
+                break;
+            default:
+                snprintf(buffer, sizeof(buffer), "mode: ?");
+                break;
+            }
         }
 
         ui_tick(&ui, buffer);

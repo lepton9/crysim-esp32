@@ -1,6 +1,7 @@
 #include "freertos/FreeRTOS.h"
 #include "esp_log.h"
 #include "driver/gpio.h"
+#include "sdkconfig.h"
 
 #include "pin_config.h"
 #include "display_s3.h"
