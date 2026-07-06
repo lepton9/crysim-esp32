@@ -1,3 +1,18 @@
 config LILYGO_T_DISPLAY_S3
     bool
     default y
+
+menu "TCP Client"
+
+    config TCP_CLIENT_SERVER_IP
+        string "Server IPv4 address"
+        default "127.0.0.1"
+        help
+            IPv4 address of the TCP server to connect to.
+
+    config TCP_CLIENT_SERVER_PORT
+        int "Server port"
+        range 1 65535
+        default 5555
+
+endmenu

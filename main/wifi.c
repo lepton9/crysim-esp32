@@ -8,15 +8,21 @@
 #include <esp_wifi.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <freertos/event_groups.h>
 
 #include "wifi.h"
 
 static char const * const TAG = "wifi";
 
-static bool s_autoreconnect = true;
+static bool autoreconnect = true;
+static EventGroupHandle_t wifi_event_group = NULL;
+
+EventGroupHandle_t wifi_event_group_get(void) {
+    return wifi_event_group;
+}
 
 void wifi_set_autoreconnect(bool enabled) {
-    s_autoreconnect = enabled;
+    autoreconnect = enabled;
 }
 
 static struct retry_num {
@@ -41,7 +47,8 @@ static void _handle_wifi_sta_start(void *arg, esp_event_base_t event_base,
     (void)event_id;
     (void)event_data;
 
-    if (!s_autoreconnect) return;
+    if (wifi_event_group) xEventGroupClearBits(wifi_event_group, WIFI_GOT_IP_BIT);
+    if (!autoreconnect) return;
 
     // Avoid spamming connect attempts if no SSID is configured
     wifi_config_t cfg = { 0 };
@@ -53,7 +60,8 @@ static void _handle_wifi_sta_start(void *arg, esp_event_base_t event_base,
 
 static void _handle_wifi_sta_disconnect(void *arg, esp_event_base_t event_base,
                                         int32_t event_id, void *event_data) {
-    if (!s_autoreconnect) return;
+    if (wifi_event_group) xEventGroupClearBits(wifi_event_group, WIFI_GOT_IP_BIT);
+    if (!autoreconnect) return;
 
     // Avoid spamming connect attempts if no SSID is configured
     wifi_config_t cfg = { 0 };
@@ -97,11 +105,18 @@ static void _handle_sta_got_ip(void *arg, esp_event_base_t event_base,
     ESP_LOGI(TAG, "IP addr " IPSTR, IP2STR(&event->ip_info.ip));
     _retry_num.ap_not_found = _retry_num.ap_auth_fail = 0;
 
+    if (wifi_event_group) xEventGroupSetBits(wifi_event_group, WIFI_GOT_IP_BIT);
+
     // this would be a great place to start OTA Update
     //xTaskCreate(&ota_update_task, "ota_update_task", 8192, NULL, 5, NULL);
 }
 
 void init_wifi() {
+    if (!wifi_event_group) {
+        wifi_event_group = xEventGroupCreate();
+        if (wifi_event_group) xEventGroupClearBits(wifi_event_group, WIFI_GOT_IP_BIT);
+    }
+
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
