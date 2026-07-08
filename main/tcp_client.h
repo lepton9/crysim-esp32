@@ -8,9 +8,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 
-#define TCP_CLIENT_MAX_MSG_LEN 256
-#define TCP_CLIENT_REQ_QUEUE_LEN 8
-#define TCP_CLIENT_RES_QUEUE_LEN 8
+#define TCP_CLIENT_MAX_MSG_LEN 512
+#define TCP_CLIENT_REQ_QUEUE_LEN 4
+#define TCP_CLIENT_RES_QUEUE_LEN 4
 #define TCP_CLIENT_RESPONSE_TIMEOUT_MS 3000
 
 typedef struct {

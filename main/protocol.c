@@ -7,6 +7,7 @@
 
 cJSON *build_request_json(int id, const char *token, const char *method) {
     cJSON *root = cJSON_CreateObject();
+
     if (!root) return NULL;
 
     cJSON_AddNumberToObject(root, "id", id);
@@ -17,6 +18,7 @@ cJSON *build_request_json(int id, const char *token, const char *method) {
 
 cJSON *build_params_login(const char *username, const char *password) {
     cJSON *params = cJSON_CreateObject();
+
     if (!params) return NULL;
 
     cJSON_AddStringToObject(params, "username", username ? username : "");

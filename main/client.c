@@ -1,19 +1,29 @@
 #include "client.h"
 
+#include <math.h>
+#include <limits.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 
+#include "cJSON.h"
 #include "esp_log.h"
 #include "esp_err.h"
 #include "esp_netif.h"
 #include "freertos/task.h"
 
 #include <network_provisioning/manager.h>
+#include <time.h>
 
 #include "ble_prov.h"
+#include "lwipopts.h"
 #include "wifi.h"
+#include "tcp_client.h"
+#include "protocol.h"
 
 static const char *TAG = "client";
+
+#define REQUEST_ID(id) id < UINT_MAX ? id + 1 : 1
 
 static void update_wifi_status(client_status_t *st) {
     if (!st) return;
@@ -108,8 +118,99 @@ static void maybe_start_provisioning(
 // If provisioning succeeded, connect Wi-Fi
 static void connect_wifi_maybe() {
     bool provisioned = false;
+
     if (ble_prov_is_provisioned(&provisioned) == ESP_OK && provisioned)
         wifi_init_sta();
+}
+
+void request_login(tcp_client_status *st) {
+    st->req_id = REQUEST_ID(st->req_id);
+    st->logging_in_id = st->req_id;
+
+    tcp_client_request_t request = {
+        .request_id      = st->req_id,
+        .expect_response = true,
+    };
+
+    cJSON *json = build_request_json(st->req_id, st->token, "login");
+    cJSON *params = build_params_login(USERNAME, PASSWORD);
+    cJSON_AddItemToObject(json, "params", params);
+    int n = json_string(json, request.data, TCP_CLIENT_MAX_MSG_LEN);
+    cJSON_Delete(json);
+    if (n <= 0) return;
+    request.len = n;
+
+    bool ok = tcp_client_enqueue(&request, 0);
+    if (!ok) ESP_LOGE(TAG, "Login request enqueue failed");
+}
+
+void request_state(tcp_client_status *st) {
+    st->req_id = REQUEST_ID(st->req_id);
+
+    tcp_client_request_t request = {
+        .request_id      = st->req_id,
+        .expect_response = true,
+    };
+
+    cJSON *json = build_request_json(st->req_id, st->token, "state");
+    int n = json_string(json, request.data, TCP_CLIENT_MAX_MSG_LEN);
+    cJSON_Delete(json);
+    if (n <= 0) return;
+    request.len = n;
+
+    bool ok = tcp_client_enqueue(&request, 0);
+    if (!ok) ESP_LOGE(TAG, "State request enqueue failed");
+}
+
+// Get and handle a response from the queue if there is one.
+void try_get_response(client_status_t *st) {
+    tcp_client_response_t response = { 0 };
+
+    if (!tcp_client_dequeue_response(&response, 0)) return;
+
+    cJSON *res = cJSON_ParseWithLength(response.data, response.len);
+    if (!res) return;
+    ESP_LOGI(TAG, "Response: %s", response.data);
+
+    bool ok = cJSON_IsTrue(cJSON_GetObjectItem(res, "ok"));
+    if (!ok) {
+        cJSON* err = cJSON_GetObjectItem(res, "error");
+        if (err) {
+            ESP_LOGE(TAG, "Response error: %s", response.data);
+            char *code = cJSON_GetStringValue(cJSON_GetObjectItem(err, "code"));
+            if (strcmp(code, "unauthorized") == 0) st->data.logged_in = false;
+        }
+        goto end;
+    }
+
+    cJSON *result = cJSON_GetObjectItem(res, "result");
+    int id = cJSON_GetNumberValue(cJSON_GetObjectItem(res, "id"));
+    // Login response
+    if (id == st->data.logging_in_id) {
+        char *token = cJSON_GetStringValue(cJSON_GetObjectItem(result, "token"));
+        double expires_at_ms = cJSON_GetNumberValue(cJSON_GetObjectItem(result, "expires_at_ms"));
+        if (token) {
+            strlcpy(st->data.token, token, sizeof(st->data.token));
+            st->data.logging_in_id = 0;
+            st->data.logged_in = true;
+        }
+        if (expires_at_ms != (double)NAN) st->data.expires_at_s = (int)(expires_at_ms / 1000);
+    } else {
+        // TODO: data storing
+        size_t n = response.len;
+        if (n >= sizeof(st->data.data)) n = sizeof(st->data.data) - 1;
+        memcpy(st->data.data, response.data, n);
+        st->data.data[n] = 0;
+    }
+ end:
+    cJSON_Delete(res);
+}
+
+int now_ts() {
+    // TODO: get unix timestamp
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return tv.tv_sec;
 }
 
 static void client_task(void *arg) {
@@ -129,6 +230,9 @@ static void client_task(void *arg) {
     init_nvs();
     init_wifi();
     connect_wifi_maybe();
+
+    // Start the TCP client task. Waits if no wifi connected.
+    tcp_client_start();
 
     bool prov_running = false;
     TaskHandle_t prov_task_handle = NULL;
@@ -184,6 +288,19 @@ static void client_task(void *arg) {
                 break;
             }
         }
+
+
+        int now = now_ts();
+        bool token_expired = st.data.expires_at_s < now;
+        // ESP_LOGI(TAG, "%d %d", now, st.data.expires_at_s);
+
+        // Get state or login if not logged in already
+        if (st.data.logged_in && !token_expired)
+            request_state(&st.data);
+        else if (st.data.logging_in_id == 0)
+            request_login(&st.data);
+
+        try_get_response(&st);
 
         update_wifi_status(&st);
         xQueueOverwrite(status_q, &st);

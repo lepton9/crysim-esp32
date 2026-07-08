@@ -17,11 +17,12 @@
 #include "display_s3.h"
 #include "pin_config.h"
 #include "client.h"
+#include "widgets/lv_label.h"
 
 static const char *TAG = "ui";
 
 #define UI_LVGL_TICK_MS 5
-#define BUTTON_HOLD_MS 3000
+#define BUTTON_HOLD_MS 2000
 #define BUTTON_DEBOUNCE_MS 30
 
 #define RETURN_IF_ERR(expr) do { \
@@ -86,23 +87,26 @@ esp_err_t ui_init(ui_t *ui) {
     }
 
     // Setup UI layout
+    ui->status_top_label = lv_label_create(lv_scr_act());;
     ui->ui_text_label = lv_label_create(lv_scr_act());;
+    lv_label_set_text(ui->status_top_label, "");
     lv_label_set_text(ui->ui_text_label, "");
-    lv_obj_align(ui->ui_text_label, LV_ALIGN_TOP_LEFT, 10, 10);
+    lv_obj_align(ui->status_top_label, LV_ALIGN_TOP_LEFT, 10, 2);
+    lv_obj_align(ui->ui_text_label, LV_ALIGN_TOP_LEFT, 10, 30);
 
     return ESP_OK;
 }
 
-static void render_ui(ui_t *ui, const char *buffer) {
-    if (!ui->ui_text_label) return;
-    const char *text = buffer ? buffer : "";
-    lv_label_set_text_fmt((lv_obj_t *)ui->ui_text_label, "%s", text);
+static void render_ui(ui_t *ui) {
+    if (!ui->ui_text_label || !ui->status_top_label) return;
+    lv_label_set_text_fmt((lv_obj_t *)ui->status_top_label, "%s", ui->status_buf);
+    lv_label_set_text_fmt((lv_obj_t *)ui->ui_text_label, "%s", ui->ui_text_buf);
 }
 
-void ui_tick(ui_t *ui, const char *buffer) {
+void ui_tick(ui_t *ui) {
     if (!ui) return;
     ui->ticks++;
-    render_ui(ui, buffer);
+    render_ui(ui);
     lv_timer_handler();
 }
 
@@ -178,6 +182,35 @@ static button_sample_t button_update(button_t *b, bool raw_pressed, TickType_t n
     return s;
 }
 
+void update_ui_buffers(ui_t *ui, const client_status_t *st) {
+    switch (st->ui_mode) {
+    case CLIENT_UI_NORMAL:
+        // const char *wifi_state = st->wifi_connected ? "connected" :
+        //                          (st->wifi_ssid[0] ? "not connected" : "not provisioned");
+        const char *ssid = st->wifi_ssid[0] ? st->wifi_ssid : "(none)";
+        const char *ip = st->wifi_connected ? (st->wifi_ip[0] ? st->wifi_ip : "(none)") : "-";
+        snprintf(ui->status_buf, sizeof(ui->status_buf),
+                 "SSID: %s - IP: %s",
+                 ssid,
+                 ip);
+        snprintf(ui->ui_text_buf, sizeof(ui->ui_text_buf), "%s", st->data.data);
+        break;
+    case CLIENT_UI_PROV_PROMPT:
+        snprintf(ui->ui_text_buf, sizeof(ui->ui_text_buf),
+                 "Provision WiFi?\nB2: start\nHold B1: cancel\nHold B1+B2: reset");
+        break;
+    case CLIENT_UI_PROVISIONING:
+        snprintf(ui->ui_text_buf, sizeof(ui->ui_text_buf),
+                 "BLE Provisioning\nName: %s\nWiFi: %s\nHold B1: stop",
+                 st->ble_name[0] ? st->ble_name : "(tbd)",
+                 st->wifi_connected ? "connected" : "connecting");
+        break;
+    default:
+        snprintf(ui->ui_text_buf, sizeof(ui->ui_text_buf), "mode: ?");
+        break;
+    }
+}
+
 static void ui_task(void *arg) {
     ui_task_args_t *a = (ui_task_args_t *)arg;
     QueueHandle_t cmd_q = a->cmd_q;
@@ -197,9 +230,6 @@ static void ui_task(void *arg) {
 
     bool have_status = false;
     client_status_t last_st = { 0 };
-
-    char buffer[192];
-    buffer[0] = 0;
 
     while (true) {
         client_status_t st;
@@ -274,38 +304,9 @@ static void ui_task(void *arg) {
             break;
         }
 
-        if (have_status) {
-            switch (last_st.ui_mode) {
-            case CLIENT_UI_NORMAL:
-                const char *wifi_state = last_st.wifi_connected ? "connected" :
-                                         (last_st.wifi_ssid[0] ? "not connected" : "not provisioned");
-                const char *ssid = last_st.wifi_ssid[0] ? last_st.wifi_ssid : "(none)";
-                const char *ip = last_st.wifi_connected ? (last_st.wifi_ip[0] ? last_st.wifi_ip : "(none)") : "-";
-                snprintf(buffer, sizeof(buffer),
-                         "WiFi: %s\nSSID: %s\nIP: %s\nB1=%" PRIu32 " B2=%" PRIu32,
-                         wifi_state,
-                         ssid,
-                         ip,
-                         last_st.button1_presses,
-                         last_st.button2_presses);
-                break;
-            case CLIENT_UI_PROV_PROMPT:
-                snprintf(buffer, sizeof(buffer),
-                         "Provision WiFi?\nB2: start\nHold B1: cancel\nHold B1+B2: reset");
-                break;
-            case CLIENT_UI_PROVISIONING:
-                snprintf(buffer, sizeof(buffer),
-                         "BLE Provisioning\nName: %s\nWiFi: %s\nHold B1: stop",
-                         last_st.ble_name[0] ? last_st.ble_name : "(tbd)",
-                         last_st.wifi_connected ? "connected" : "connecting");
-                break;
-            default:
-                snprintf(buffer, sizeof(buffer), "mode: ?");
-                break;
-            }
-        }
+        if (have_status) update_ui_buffers(&ui, &last_st);
 
-        ui_tick(&ui, buffer);
+        ui_tick(&ui);
         vTaskDelay(pdMS_TO_TICKS(LOOP_FREQ_MS));
     }
 }
