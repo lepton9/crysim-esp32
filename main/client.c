@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 #include "cJSON.h"
 #include "esp_log.h"
@@ -24,6 +25,14 @@
 static const char *TAG = "client";
 
 #define REQUEST_ID(id) id < UINT_MAX ? id + 1 : 1
+
+int now_ts() {
+    // TODO: get unix timestamp
+    struct timeval tv;
+
+    gettimeofday(&tv, NULL);
+    return tv.tv_sec;
+}
 
 static void update_wifi_status(client_status_t *st) {
     if (!st) return;
@@ -133,9 +142,11 @@ void request_login(tcp_client_status *st) {
     };
 
     cJSON *json = build_request_json(st->req_id, st->token, "login");
-    cJSON *params = build_params_login(USERNAME, PASSWORD);
+    const char *username = CONFIG_TCP_CLIENT_USERNAME;
+    const char *password = CONFIG_TCP_CLIENT_PASSWORD;
+    cJSON *params = build_params_login(username, password);
     cJSON_AddItemToObject(json, "params", params);
-    int n = json_string(json, request.data, TCP_CLIENT_MAX_MSG_LEN);
+    int n = json_string(json, request.data, TCP_CLIENT_MAX_REQUEST_LEN);
     cJSON_Delete(json);
     if (n <= 0) return;
     request.len = n;
@@ -153,13 +164,102 @@ void request_state(tcp_client_status *st) {
     };
 
     cJSON *json = build_request_json(st->req_id, st->token, "state");
-    int n = json_string(json, request.data, TCP_CLIENT_MAX_MSG_LEN);
+    int n = json_string(json, request.data, TCP_CLIENT_MAX_REQUEST_LEN);
     cJSON_Delete(json);
     if (n <= 0) return;
     request.len = n;
 
     bool ok = tcp_client_enqueue(&request, 0);
-    if (!ok) ESP_LOGE(TAG, "State request enqueue failed");
+    if (ok) st->fetching_state = true;
+    else ESP_LOGE(TAG, "State request enqueue failed");
+}
+
+static void str_copy(char *dst, size_t dst_len, const char *src) {
+    if (!dst || dst_len == 0) return;
+    if (!src) {
+        dst[0] = 0;
+        return;
+    }
+    strlcpy(dst, src, dst_len);
+}
+
+static bool json_get_double_any(cJSON *obj, const char *key, double *out) {
+    if (!obj || !key || !out) return false;
+    cJSON *it = cJSON_GetObjectItem(obj, key);
+    if (!it) return false;
+    if (cJSON_IsNumber(it)) {
+        *out = it->valuedouble;
+        return true;
+    }
+    if (cJSON_IsString(it) && it->valuestring) {
+        char *end = NULL;
+        double v = strtod(it->valuestring, &end);
+        if (end == it->valuestring) return false;
+        *out = v;
+        return true;
+    }
+    return false;
+}
+
+static void clear_state(tcp_client_status *st) {
+    if (!st) return;
+    st->have_state = false;
+    st->equity_usd = 0;
+    st->net_deposits_usd = 0;
+    st->pnl_usd = 0;
+    st->fees_paid_usd = 0;
+    st->balances_len = 0;
+    st->assets_len = 0;
+}
+
+static void parse_state_result(tcp_client_status *st, cJSON *result, int now_s) {
+    if (!st || !result) return;
+    clear_state(st);
+
+    (void)json_get_double_any(result, "equity_usd", &st->equity_usd);
+    (void)json_get_double_any(result, "net_deposits_usd", &st->net_deposits_usd);
+    (void)json_get_double_any(result, "pnl_usd", &st->pnl_usd);
+    (void)json_get_double_any(result, "fees_paid_usd", &st->fees_paid_usd);
+
+    cJSON *balances = cJSON_GetObjectItem(result, "balances");
+    if (cJSON_IsArray(balances)) {
+        const int n = cJSON_GetArraySize(balances);
+        for (int i = 0; i < n && st->balances_len < MAX_BALANCES; i++) {
+            cJSON *b = cJSON_GetArrayItem(balances, i);
+            if (!cJSON_IsObject(b)) continue;
+            const char *asset = cJSON_GetStringValue(cJSON_GetObjectItem(b, "asset"));
+            double amount = 0;
+            if (!json_get_double_any(b, "amount", &amount)) continue;
+            str_copy(st->balances[st->balances_len].asset, sizeof(st->balances[st->balances_len].asset), asset);
+            st->balances[st->balances_len].amount = amount;
+            st->balances_len++;
+        }
+    }
+
+    cJSON *assets = cJSON_GetObjectItem(result, "assets");
+    if (cJSON_IsArray(assets)) {
+        const int n = cJSON_GetArraySize(assets);
+        for (int i = 0; i < n && st->assets_len < MAX_ASSETS; i++) {
+            cJSON *a = cJSON_GetArrayItem(assets, i);
+            if (!cJSON_IsObject(a)) continue;
+            const char *asset = cJSON_GetStringValue(cJSON_GetObjectItem(a, "asset"));
+
+            double qty = 0;
+            if (!json_get_double_any(a, "qty", &qty)) continue;
+
+            uint8_t idx = st->assets_len;
+            str_copy(st->assets[idx].asset, sizeof(st->assets[idx].asset), asset);
+            st->assets[idx].qty = qty;
+            (void)json_get_double_any(a, "cost_basis_usd", &st->assets[idx].cost_basis_usd);
+            (void)json_get_double_any(a, "spot_price_usd", &st->assets[idx].spot_price_usd);
+            (void)json_get_double_any(a, "market_value_usd", &st->assets[idx].market_value_usd);
+            (void)json_get_double_any(a, "unrealized_pnl_usd", &st->assets[idx].unrealized_pnl_usd);
+            st->assets_len++;
+        }
+    }
+
+    st->have_state = true;
+    st->last_state_ts = now_s;
 }
 
 // Get and handle a response from the queue if there is one.
@@ -174,7 +274,7 @@ void try_get_response(client_status_t *st) {
 
     bool ok = cJSON_IsTrue(cJSON_GetObjectItem(res, "ok"));
     if (!ok) {
-        cJSON* err = cJSON_GetObjectItem(res, "error");
+        cJSON *err = cJSON_GetObjectItem(res, "error");
         if (err) {
             ESP_LOGE(TAG, "Response error: %s", response.data);
             char *code = cJSON_GetStringValue(cJSON_GetObjectItem(err, "code"));
@@ -184,33 +284,27 @@ void try_get_response(client_status_t *st) {
     }
 
     cJSON *result = cJSON_GetObjectItem(res, "result");
-    int id = cJSON_GetNumberValue(cJSON_GetObjectItem(res, "id"));
+    const uint32_t req_id = response.request_id;
+
     // Login response
-    if (id == st->data.logging_in_id) {
+    if (req_id != 0 && req_id == st->data.logging_in_id) {
         char *token = cJSON_GetStringValue(cJSON_GetObjectItem(result, "token"));
-        double expires_at_ms = cJSON_GetNumberValue(cJSON_GetObjectItem(result, "expires_at_ms"));
+        double expires_at_ms = 0;
+        bool have_expires = json_get_double_any(result, "expires_at_ms", &expires_at_ms);
         if (token) {
             strlcpy(st->data.token, token, sizeof(st->data.token));
             st->data.logging_in_id = 0;
             st->data.logged_in = true;
         }
-        if (expires_at_ms != (double)NAN) st->data.expires_at_s = (int)(expires_at_ms / 1000);
+        if (have_expires) st->data.expires_at_s = (int)(expires_at_ms / 1000.0);
     } else {
-        // TODO: data storing
-        size_t n = response.len;
-        if (n >= sizeof(st->data.data)) n = sizeof(st->data.data) - 1;
-        memcpy(st->data.data, response.data, n);
-        st->data.data[n] = 0;
+        st->data.fetching_state = false;
+        // State response
+        if (cJSON_IsObject(result))
+            parse_state_result(&st->data, result, now_ts());
     }
  end:
     cJSON_Delete(res);
-}
-
-int now_ts() {
-    // TODO: get unix timestamp
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return tv.tv_sec;
 }
 
 static void client_task(void *arg) {
@@ -291,13 +385,14 @@ static void client_task(void *arg) {
 
 
         int now = now_ts();
-        bool token_expired = st.data.expires_at_s < now;
+        // bool token_expired = st.data.expires_at_s < now;
         // ESP_LOGI(TAG, "%d %d", now, st.data.expires_at_s);
 
         // Get state or login if not logged in already
-        if (st.data.logged_in && !token_expired)
+        if (st.data.logged_in && !st.data.fetching_state &&
+            now - st.data.last_state_ts > STATE_FETCH_FREQ_S)
             request_state(&st.data);
-        else if (st.data.logging_in_id == 0)
+        else if (!st.data.logged_in && st.data.logging_in_id == 0)
             request_login(&st.data);
 
         try_get_response(&st);

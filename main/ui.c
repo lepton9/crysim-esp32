@@ -30,6 +30,9 @@ static const char *TAG = "ui";
             if (__err != ESP_OK) return __err; \
 } while (0)
 
+#define EPSILON 0.0000001
+#define TEXT_COLOR_PNL(V) ((V > EPSILON) ? "#ff1744" : (V < -EPSILON) ? "#00c853" : "#9e9e9e")
+
 static lv_disp_draw_buf_t s_draw_buf;
 static esp_timer_handle_t s_lv_tick_timer;
 
@@ -87,20 +90,43 @@ esp_err_t ui_init(ui_t *ui) {
     }
 
     // Setup UI layout
-    ui->status_top_label = lv_label_create(lv_scr_act());;
-    ui->ui_text_label = lv_label_create(lv_scr_act());;
+    ui->status_top_label = lv_label_create(lv_scr_act());
+    ui->summary_label = lv_label_create(lv_scr_act());
+    ui->assets_label = lv_label_create(lv_scr_act());
+
+    ui->view = UI_VIEW_PORTFOLIO;
+
     lv_label_set_text(ui->status_top_label, "");
-    lv_label_set_text(ui->ui_text_label, "");
+    lv_label_set_text(ui->summary_label, "");
+    lv_label_set_text(ui->assets_label, "");
+
     lv_obj_align(ui->status_top_label, LV_ALIGN_TOP_LEFT, 10, 2);
-    lv_obj_align(ui->ui_text_label, LV_ALIGN_TOP_LEFT, 10, 30);
+    lv_obj_align(ui->summary_label, LV_ALIGN_TOP_LEFT, 10, 20);
+    lv_obj_align(ui->assets_label, LV_ALIGN_TOP_LEFT, 10, 38);
+
+    // Set max line width
+    const int content_w = DISPLAY_HOR_RES - 20;
+    lv_obj_set_width(ui->status_top_label, content_w);
+    lv_obj_set_width(ui->summary_label, content_w);
+    lv_obj_set_width(ui->assets_label, content_w);
+
+    // Set line wrapping
+    lv_label_set_long_mode(ui->status_top_label, LV_LABEL_LONG_WRAP);
+    lv_label_set_long_mode(ui->summary_label, LV_LABEL_LONG_CLIP);
+    lv_label_set_long_mode(ui->assets_label, LV_LABEL_LONG_CLIP);
+
+    // Set recoloring
+    lv_label_set_recolor(ui->summary_label, true);
+    lv_label_set_recolor(ui->assets_label, true);
 
     return ESP_OK;
 }
 
 static void render_ui(ui_t *ui) {
-    if (!ui->ui_text_label || !ui->status_top_label) return;
+    if (!ui->status_top_label || !ui->summary_label || !ui->assets_label) return;
     lv_label_set_text_fmt((lv_obj_t *)ui->status_top_label, "%s", ui->status_buf);
-    lv_label_set_text_fmt((lv_obj_t *)ui->ui_text_label, "%s", ui->ui_text_buf);
+    lv_label_set_text_fmt((lv_obj_t *)ui->summary_label, "%s", ui->summary_buf);
+    lv_label_set_text_fmt((lv_obj_t *)ui->assets_label, "%s", ui->assets_buf);
 }
 
 void ui_tick(ui_t *ui) {
@@ -193,20 +219,79 @@ void update_ui_buffers(ui_t *ui, const client_status_t *st) {
                  "SSID: %s - IP: %s",
                  ssid,
                  ip);
-        snprintf(ui->ui_text_buf, sizeof(ui->ui_text_buf), "%s", st->data.data);
+
+        if (!st->data.logged_in) {
+            snprintf(ui->summary_buf, sizeof(ui->summary_buf), "Logging in...");
+            ui->assets_buf[0] = 0;
+            break;
+        }
+
+        if (!st->data.have_state) {
+            snprintf(ui->summary_buf, sizeof(ui->summary_buf), "Connected. Waiting for state...");
+            ui->assets_buf[0] = 0;
+            break;
+        }
+
+        // Summary
+        const double pnl = st->data.pnl_usd;
+        const char *view_tag = (ui->view == UI_VIEW_MARKET) ? "Mkt" : "Port";
+        snprintf(ui->summary_buf, sizeof(ui->summary_buf),
+                 "%s  Eq $%.2f  PnL %s $%+.2f#",
+                 view_tag,
+                 st->data.equity_usd,
+                 TEXT_COLOR_PNL(pnl),
+                 pnl);
+
+        size_t off = 0;
+        int written = 0;
+
+        // Assets list
+        const uint8_t show_n = st->data.assets_len > MAX_ASSETS - 1 ? MAX_ASSETS - 1 : st->data.assets_len;
+        for (uint8_t i = 0; i < show_n && off < sizeof(ui->assets_buf); i++) {
+            const double upnl = st->data.assets[i].unrealized_pnl_usd;
+            const double pct = (st->data.assets[i].cost_basis_usd != 0.0) ? (upnl / st->data.assets[i].cost_basis_usd) * 100.0 : 0.0;
+
+            switch (ui->view) {
+            case UI_VIEW_PORTFOLIO:
+                written = snprintf(ui->assets_buf + off, sizeof(ui->assets_buf) - off,
+                                   "%s $%.2f  %s $%+.2f# %+.1f%%\n",
+                                   st->data.assets[i].asset,
+                                   st->data.assets[i].market_value_usd,
+                                   TEXT_COLOR_PNL(upnl),
+                                   upnl,
+                                   pct);
+                break;
+            case UI_VIEW_MARKET:
+                written = snprintf(ui->assets_buf + off, sizeof(ui->assets_buf) - off,
+                                   "%s $%.2f\n",
+                                   st->data.assets[i].asset,
+                                   st->data.assets[i].spot_price_usd);
+                break;
+            }
+
+            if (written < 0) written = 0;
+            off += (size_t)written;
+        }
+
+        if (st->data.assets_len > show_n && off < sizeof(ui->assets_buf))
+            (void)snprintf(ui->assets_buf + off, sizeof(ui->assets_buf) - off,
+                           "... (%u more)", (unsigned)(st->data.assets_len - show_n));
         break;
     case CLIENT_UI_PROV_PROMPT:
-        snprintf(ui->ui_text_buf, sizeof(ui->ui_text_buf),
+        snprintf(ui->summary_buf, sizeof(ui->summary_buf),
                  "Provision WiFi?\nB2: start\nHold B1: cancel\nHold B1+B2: reset");
+        ui->assets_buf[0] = 0;
         break;
     case CLIENT_UI_PROVISIONING:
-        snprintf(ui->ui_text_buf, sizeof(ui->ui_text_buf),
+        snprintf(ui->summary_buf, sizeof(ui->summary_buf),
                  "BLE Provisioning\nName: %s\nWiFi: %s\nHold B1: stop",
                  st->ble_name[0] ? st->ble_name : "(tbd)",
                  st->wifi_connected ? "connected" : "connecting");
+        ui->assets_buf[0] = 0;
         break;
     default:
-        snprintf(ui->ui_text_buf, sizeof(ui->ui_text_buf), "mode: ?");
+        snprintf(ui->summary_buf, sizeof(ui->summary_buf), "mode: ?");
+        ui->assets_buf[0] = 0;
         break;
     }
 }
@@ -277,7 +362,8 @@ static void ui_task(void *arg) {
             // Short press actions
             if (!combo_active && !both_long_fired) {
                 if (b1_s.just_released) send_cmd(cmd_q, CMD_BUTTON1_PRESS);
-                if (b2_s.just_released) send_cmd(cmd_q, CMD_BUTTON2_PRESS);
+                if (b2_s.just_released)
+                    ui.view = (ui.view == UI_VIEW_PORTFOLIO) ? UI_VIEW_MARKET : UI_VIEW_PORTFOLIO;
             }
             break;
 

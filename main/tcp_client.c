@@ -44,8 +44,8 @@ static void push_response(uint32_t request_id, int err, const char *data, uint16
     tcp_client_response_t r = { 0 };
     r.request_id = request_id;
     r.err = err;
-    if (len > (uint16_t)(TCP_CLIENT_MAX_MSG_LEN - 1))
-        len = (uint16_t)(TCP_CLIENT_MAX_MSG_LEN - 1);
+    if (len > (uint16_t)(TCP_CLIENT_MAX_RESPONSE_LEN - 1))
+        len = (uint16_t)(TCP_CLIENT_MAX_RESPONSE_LEN - 1);
     r.len = len;
     if (data && len) memcpy(r.data, data, len);
     r.data[r.len] = 0;
@@ -122,7 +122,7 @@ static void tcp_client_task(void *arg) {
         uint32_t cur_packet_id = 0;
         TickType_t cur_packet_deadline = 0;
 
-        char line_buf[TCP_CLIENT_MAX_MSG_LEN];
+        char line_buf[TCP_CLIENT_MAX_RESPONSE_LEN];
         size_t line_len = 0;
 
         // Main loop when connected to the server
@@ -177,7 +177,7 @@ static void tcp_client_task(void *arg) {
 
             tcp_client_request_t req;
             if (xQueueReceive(req_q, &req, pdMS_TO_TICKS(50)) == pdTRUE) {
-                if (req.len > TCP_CLIENT_MAX_MSG_LEN) req.len = TCP_CLIENT_MAX_MSG_LEN;
+                if (req.len > TCP_CLIENT_MAX_REQUEST_LEN) req.len = TCP_CLIENT_MAX_REQUEST_LEN;
                 bool ok_send = send_all(s, req.data, req.len);
                 if (!ok_send) {
                     ESP_LOGW(TAG, "send failed: errno=%d (%s)", errno, strerror(errno));
@@ -226,7 +226,7 @@ void tcp_client_start(void) {
 
 bool tcp_client_enqueue(const tcp_client_request_t *req, TickType_t timeout) {
     if (!req || !req_q) return false;
-    if (req->len > TCP_CLIENT_MAX_MSG_LEN) return false;
+    if (req->len > TCP_CLIENT_MAX_REQUEST_LEN) return false;
     return xQueueSend(req_q, req, timeout) == pdTRUE;
 }
 

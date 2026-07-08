@@ -8,17 +8,13 @@
 
 #define PROV_NOTIFY_IDX 1
 
-#define STATE_BUF_SIZE 256
 #define TOKEN_LEN (64 + 1)
 
-#ifndef USERNAME
-#define USERNAME "admin"
-#endif
+#define MAX_BALANCES 8
+#define MAX_ASSETS 8
+#define ASSET_SYM_LEN 8
 
-#ifndef PASSWORD
-#define PASSWORD "admin"
-#endif
-
+#define STATE_FETCH_FREQ_S 5
 
 // Commands sent from UI task to client task.
 typedef enum {
@@ -48,7 +44,35 @@ typedef struct {
 
     uint32_t logging_in_id;
     bool     logged_in;
-    char     data[STATE_BUF_SIZE];
+
+    // Most recent server state
+    bool     have_state;
+    int      last_state_ts;
+    bool     fetching_state;
+
+    // Summary
+    double   equity_usd;
+    double   net_deposits_usd;
+    double   pnl_usd;
+    double   fees_paid_usd;
+
+    // Balances
+    uint8_t  balances_len;
+    struct {
+        char   asset[ASSET_SYM_LEN];
+        double amount;
+    } balances[MAX_BALANCES];
+
+    // Owned assets
+    uint8_t assets_len;
+    struct {
+        char   asset[ASSET_SYM_LEN];
+        double qty;
+        double cost_basis_usd;
+        double spot_price_usd;
+        double market_value_usd;
+        double unrealized_pnl_usd;
+    } assets[MAX_ASSETS];
 } tcp_client_status;
 
 // Status sent from client task to UI task.

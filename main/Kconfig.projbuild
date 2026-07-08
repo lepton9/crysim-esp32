@@ -15,4 +15,12 @@ menu "TCP Client"
         range 1 65535
         default 5555
 
+    config TCP_CLIENT_USERNAME
+        string "Username"
+        default "admin"
+
+    config TCP_CLIENT_PASSWORD
+        string "Password"
+        default "admin"
+
 endmenu

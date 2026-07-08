@@ -8,7 +8,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 
-#define TCP_CLIENT_MAX_MSG_LEN 512
+#define TCP_CLIENT_MAX_REQUEST_LEN 128
+#define TCP_CLIENT_MAX_RESPONSE_LEN 1024
 #define TCP_CLIENT_REQ_QUEUE_LEN 4
 #define TCP_CLIENT_RES_QUEUE_LEN 4
 #define TCP_CLIENT_RESPONSE_TIMEOUT_MS 3000
@@ -17,14 +18,14 @@ typedef struct {
     uint32_t request_id;
     bool     expect_response;
     uint16_t len;
-    char     data[TCP_CLIENT_MAX_MSG_LEN];
+    char     data[TCP_CLIENT_MAX_REQUEST_LEN];
 } tcp_client_request_t;
 
 typedef struct {
     uint32_t request_id;
     int      err;
     uint16_t len;
-    char     data[TCP_CLIENT_MAX_MSG_LEN];
+    char     data[TCP_CLIENT_MAX_RESPONSE_LEN];
 } tcp_client_response_t;
 
 // Starts the TCP client task.
